@@ -92,6 +92,7 @@ struct _GstRTSPMediaPrivate
   /* protected by lock */
   GstRTSPPermissions *permissions;
   gboolean shared;
+  gboolean shared_pipeline;
   gboolean suspend_mode;
   gboolean reusable;
   GstRTSPProfile profiles;
@@ -145,6 +146,7 @@ struct _GstRTSPMediaPrivate
 };
 
 #define DEFAULT_SHARED          FALSE
+#define DEFAULT_SHARED_PIPELINE FALSE
 #define DEFAULT_SUSPEND_MODE    GST_RTSP_SUSPEND_MODE_NONE
 #define DEFAULT_REUSABLE        FALSE
 #define DEFAULT_PROFILES        GST_RTSP_PROFILE_AVP
@@ -164,6 +166,7 @@ enum
 {
   PROP_0,
   PROP_SHARED,
+  PROP_SHARED_PIPELINE,
   PROP_SUSPEND_MODE,
   PROP_REUSABLE,
   PROP_PROFILES,
@@ -308,6 +311,11 @@ gst_rtsp_media_class_init (GstRTSPMediaClass * klass)
           "If this media pipeline can be shared", DEFAULT_SHARED,
           G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
+  g_object_class_install_property (gobject_class, PROP_SHARED_PIPELINE,
+      g_param_spec_boolean ("shared-pipeline", "Shared Pipeline",
+          "If the pipeline is shared", DEFAULT_SHARED_PIPELINE,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   g_object_class_install_property (gobject_class, PROP_SUSPEND_MODE,
       g_param_spec_enum ("suspend-mode", "Suspend Mode",
           "How to suspend the media in PAUSED", GST_TYPE_RTSP_SUSPEND_MODE,
@@ -430,6 +438,7 @@ gst_rtsp_media_init (GstRTSPMedia * media)
   g_rec_mutex_init (&priv->state_lock);
 
   priv->shared = DEFAULT_SHARED;
+  priv->shared_pipeline = DEFAULT_SHARED_PIPELINE;
   priv->suspend_mode = DEFAULT_SUSPEND_MODE;
   priv->reusable = DEFAULT_REUSABLE;
   priv->profiles = DEFAULT_PROFILES;
@@ -490,6 +499,9 @@ gst_rtsp_media_get_property (GObject * object, guint propid,
     case PROP_SHARED:
       g_value_set_boolean (value, gst_rtsp_media_is_shared (media));
       break;
+    case PROP_SHARED_PIPELINE:
+      g_value_set_boolean (value, gst_rtsp_media_pipeline_is_shared (media));
+      break;
     case PROP_SUSPEND_MODE:
       g_value_set_enum (value, gst_rtsp_media_get_suspend_mode (media));
       break;
@@ -541,6 +553,9 @@ gst_rtsp_media_set_property (GObject * object, guint propid,
       break;
     case PROP_SHARED:
       gst_rtsp_media_set_shared (media, g_value_get_boolean (value));
+      break;
+    case PROP_SHARED_PIPELINE:
+      gst_rtsp_media_pipeline_set_shared (media, g_value_get_boolean (value));
       break;
     case PROP_SUSPEND_MODE:
       gst_rtsp_media_set_suspend_mode (media, g_value_get_enum (value));
@@ -926,7 +941,7 @@ gst_rtsp_media_get_suspend_mode (GstRTSPMedia * media)
  * @media: a #GstRTSPMedia
  * @shared: the new value
  *
- * Set or unset if the pipeline for @media can be shared will multiple clients.
+ * Set or unset if the pipeline for @media can be shared wth multiple clients.
  * When @shared is %TRUE, client requests for this media will share the media
  * pipeline.
  */
@@ -964,6 +979,50 @@ gst_rtsp_media_is_shared (GstRTSPMedia * media)
 
   g_mutex_lock (&priv->lock);
   res = priv->shared;
+  g_mutex_unlock (&priv->lock);
+
+  return res;
+}
+
+/**
+ * gst_rtsp_media_pipeline_set_shared:
+ * @media: a #GstRTSPMedia
+ * @shared: the new value
+ *
+ * Set or unset if the pipeline for @media can be shared will multiple media.
+ */
+void
+gst_rtsp_media_pipeline_set_shared (GstRTSPMedia * media, gboolean shared)
+{
+  GstRTSPMediaPrivate *priv;
+
+  g_return_if_fail (GST_IS_RTSP_MEDIA (media));
+
+  priv = media->priv;
+
+  g_mutex_lock (&priv->lock);
+  priv->shared_pipeline = shared;
+  g_mutex_unlock (&priv->lock);
+}
+
+/**
+ * gst_rtsp_media_pipeline_is_shared:
+ * @media: a #GstRTSPMedia
+ *
+ * Check if the pipeline for @media can be shared between multiple media.
+ */
+gboolean
+gst_rtsp_media_pipeline_is_shared (GstRTSPMedia * media)
+{
+  GstRTSPMediaPrivate *priv;
+  gboolean res;
+
+  g_return_val_if_fail (GST_IS_RTSP_MEDIA (media), FALSE);
+
+  priv = media->priv;
+
+  g_mutex_lock (&priv->lock);
+  res = priv->shared_pipeline;
   g_mutex_unlock (&priv->lock);
 
   return res;
@@ -1789,8 +1848,6 @@ gst_rtsp_media_create_stream (GstRTSPMedia * media, GstElement * payloader,
 {
   GstRTSPMediaPrivate *priv;
   GstRTSPStream *stream;
-  GstPad *ghostpad;
-  gchar *name;
   gint idx;
 
   g_return_val_if_fail (GST_IS_RTSP_MEDIA (media), NULL);
@@ -1804,17 +1861,7 @@ gst_rtsp_media_create_stream (GstRTSPMedia * media, GstElement * payloader,
 
   GST_DEBUG ("media %p: creating stream with index %d", media, idx);
 
-  if (GST_PAD_IS_SRC (pad))
-    name = g_strdup_printf ("src_%u", idx);
-  else
-    name = g_strdup_printf ("sink_%u", idx);
-
-  ghostpad = gst_ghost_pad_new (name, pad);
-  gst_pad_set_active (ghostpad, TRUE);
-  gst_element_add_pad (priv->element, ghostpad);
-  g_free (name);
-
-  stream = gst_rtsp_stream_new (idx, payloader, ghostpad);
+  stream = gst_rtsp_stream_new (idx, payloader, pad);
   if (priv->pool)
     gst_rtsp_stream_set_address_pool (stream, priv->pool);
   gst_rtsp_stream_set_multicast_iface (stream, priv->multicast_iface);
@@ -2318,23 +2365,31 @@ media_streams_blocking (GstRTSPMedia * media)
 }
 
 static GstStateChangeReturn
-set_state (GstRTSPMedia * media, GstState state)
+set_pipeline_state (GstRTSPMedia * media, GstState state)
 {
   GstRTSPMediaPrivate *priv = media->priv;
   GstStateChangeReturn ret;
 
-  GST_INFO ("set state to %s for media %p", gst_element_state_get_name (state),
-      media);
-  ret = gst_element_set_state (priv->pipeline, state);
+  if (!priv->shared_pipeline) {
+    GST_INFO ("set state to %s for media %p",
+        gst_element_state_get_name (state), media);
+    ret = gst_element_set_state (priv->pipeline, state);
+  } else {
+    GST_INFO ("shared pipeline; ignoring pipeline state change %s for media %p",
+        gst_element_state_get_name (state), media);
+    if (priv->rtpbin)
+      gst_element_set_state (priv->rtpbin, state);
+    gst_element_set_state (priv->element, state);
+    ret = GST_STATE_CHANGE_SUCCESS;
+  }
 
   return ret;
 }
 
 static GstStateChangeReturn
-set_target_state (GstRTSPMedia * media, GstState state, gboolean do_state)
+set_target_state (GstRTSPMedia * media, GstState state)
 {
   GstRTSPMediaPrivate *priv = media->priv;
-  GstStateChangeReturn ret;
 
   GST_INFO ("set target state to %s for media %p",
       gst_element_state_get_name (state), media);
@@ -2343,12 +2398,7 @@ set_target_state (GstRTSPMedia * media, GstState state, gboolean do_state)
   g_signal_emit (media, gst_rtsp_media_signals[SIGNAL_TARGET_STATE], 0,
       priv->target_state, NULL);
 
-  if (do_state)
-    ret = set_state (media, state);
-  else
-    ret = GST_STATE_CHANGE_SUCCESS;
-
-  return ret;
+  return GST_STATE_CHANGE_SUCCESS;
 }
 
 /* called with state-lock */
@@ -2363,6 +2413,11 @@ default_handle_message (GstRTSPMedia * media, GstMessage * message)
   switch (type) {
     case GST_MESSAGE_STATE_CHANGED:
     {
+      /* For shared pipelines, we neither change its state nor
+       *  respond to state changes */
+      if (priv->shared_pipeline)
+        break;
+
       GstState old, new, pending;
 
       if (GST_MESSAGE_SRC (message) != GST_OBJECT (priv->pipeline))
@@ -2400,7 +2455,7 @@ default_handle_message (GstRTSPMedia * media, GstMessage * message)
         /* if the desired state is playing, go back */
         if (priv->target_state == GST_STATE_PLAYING) {
           GST_INFO ("Buffering done, setting pipeline to PLAYING");
-          set_state (media, GST_STATE_PLAYING);
+          set_pipeline_state (media, GST_STATE_PLAYING);
         } else {
           GST_INFO ("Buffering done");
         }
@@ -2410,7 +2465,7 @@ default_handle_message (GstRTSPMedia * media, GstMessage * message)
           if (priv->target_state == GST_STATE_PLAYING) {
             /* we were not buffering but PLAYING, PAUSE  the pipeline. */
             GST_INFO ("Buffering, setting pipeline to PAUSED ...");
-            set_state (media, GST_STATE_PAUSED);
+            set_pipeline_state (media, GST_STATE_PAUSED);
           } else {
             GST_INFO ("Buffering ...");
           }
@@ -2586,7 +2641,7 @@ pad_added_cb (GstElement * element, GstPad * pad, GstRTSPMedia * media)
 
   /* join the element in the PAUSED state because this callback is
    * called from the streaming thread and it is PAUSED */
-  if (!gst_rtsp_stream_join_bin (stream, GST_BIN (priv->pipeline),
+  if (!gst_rtsp_stream_join_bin (stream, GST_BIN (priv->element),
           priv->rtpbin, GST_STATE_PAUSED)) {
     GST_WARNING ("failed to join bin element");
   }
@@ -2619,7 +2674,7 @@ pad_removed_cb (GstElement * element, GstPad * pad, GstRTSPMedia * media)
   GST_INFO ("pad removed %s:%s, stream %p", GST_DEBUG_PAD_NAME (pad), stream);
 
   g_rec_mutex_lock (&priv->state_lock);
-  gst_rtsp_stream_leave_bin (stream, GST_BIN (priv->pipeline), priv->rtpbin);
+  gst_rtsp_stream_leave_bin (stream, GST_BIN (priv->element), priv->rtpbin);
   g_rec_mutex_unlock (&priv->state_lock);
 
   gst_rtsp_media_remove_stream (media, stream);
@@ -2670,7 +2725,19 @@ start_preroll (GstRTSPMedia * media)
 
   GST_INFO ("setting pipeline to PAUSED for media %p", media);
   /* first go to PAUSED */
-  ret = set_target_state (media, GST_STATE_PAUSED, TRUE);
+  set_target_state (media, GST_STATE_PAUSED);
+
+  if (priv->shared_pipeline) {
+    if (priv->transport_mode & GST_RTSP_TRANSPORT_MODE_RECORD) {
+      collect_media_stats (media);
+
+      g_assert (priv->status == GST_RTSP_MEDIA_STATUS_PREPARING);
+      gst_rtsp_media_set_status (media, GST_RTSP_MEDIA_STATUS_PREPARED);
+    }
+    return TRUE;
+  }
+
+  ret = set_pipeline_state (media, GST_STATE_PAUSED);
 
   switch (ret) {
     case GST_STATE_CHANGE_SUCCESS:
@@ -2692,7 +2759,7 @@ start_preroll (GstRTSPMedia * media)
         /* start blocked  to make sure nothing goes to the sink */
         media_streams_set_blocked (media, TRUE);
       }
-      ret = set_state (media, GST_STATE_PLAYING);
+      ret = set_pipeline_state (media, GST_STATE_PLAYING);
       if (ret == GST_STATE_CHANGE_FAILURE)
         goto state_failed;
       break;
@@ -2773,7 +2840,7 @@ start_prepare (GstRTSPMedia * media)
           (GCallback) request_aux_sender, media);
     }
 
-    if (!gst_rtsp_stream_join_bin (stream, GST_BIN (priv->pipeline),
+    if (!gst_rtsp_stream_join_bin (stream, GST_BIN (priv->element),
             priv->rtpbin, GST_STATE_NULL)) {
       goto join_bin_failed;
     }
@@ -2867,6 +2934,7 @@ default_prepare (GstRTSPMedia * media, GstRTSPThread * thread)
   if (priv->rtpbin == NULL)
     goto no_rtpbin;
 
+
   priv->thread = thread;
   context = (thread != NULL) ? (thread->context) : NULL;
 
@@ -2882,7 +2950,7 @@ default_prepare (GstRTSPMedia * media, GstRTSPThread * thread)
   priv->id = g_source_attach (priv->source, context);
 
   /* add stuff to the bin */
-  gst_bin_add (GST_BIN (priv->pipeline), priv->rtpbin);
+  gst_bin_add (GST_BIN (priv->element), priv->rtpbin);
 
   /* do remainder in context */
   source = g_idle_source_new ();
@@ -3048,7 +3116,7 @@ finish_unprepare (GstRTSPMedia * media)
   /* release the lock on shutdown, otherwise pad_added_cb might try to
    * acquire the lock and then we deadlock */
   g_rec_mutex_unlock (&priv->state_lock);
-  set_state (media, GST_STATE_NULL);
+  set_pipeline_state (media, GST_STATE_NULL);
   g_rec_mutex_lock (&priv->state_lock);
 
   if (priv->status != GST_RTSP_MEDIA_STATUS_UNPREPARING)
@@ -3063,7 +3131,7 @@ finish_unprepare (GstRTSPMedia * media)
 
     stream = g_ptr_array_index (priv->streams, i);
 
-    gst_rtsp_stream_leave_bin (stream, GST_BIN (priv->pipeline), priv->rtpbin);
+    gst_rtsp_stream_leave_bin (stream, GST_BIN (priv->element), priv->rtpbin);
   }
 
   /* remove the pad signal handlers */
@@ -3084,7 +3152,7 @@ finish_unprepare (GstRTSPMedia * media)
     g_slice_free (DynPaySignalHandlers, handlers);
   }
 
-  gst_bin_remove (GST_BIN (priv->pipeline), priv->rtpbin);
+  gst_bin_remove (GST_BIN (priv->element), priv->rtpbin);
   priv->rtpbin = NULL;
 
   if (priv->nettime)
@@ -3124,7 +3192,7 @@ default_unprepare (GstRTSPMedia * media)
     gst_element_send_event (priv->pipeline, gst_event_new_eos ());
     /* we need to go to playing again for the EOS to propagate, normally in this
      * state, nothing is receiving data from us anymore so this is ok. */
-    set_state (media, GST_STATE_PLAYING);
+    set_pipeline_state (media, GST_STATE_PLAYING);
   } else {
     finish_unprepare (media);
   }
@@ -3162,10 +3230,11 @@ gst_rtsp_media_unprepare (GstRTSPMedia * media)
   GST_INFO ("unprepare media %p", media);
   if (priv->blocked)
     media_streams_set_blocked (media, FALSE);
-  set_target_state (media, GST_STATE_NULL, FALSE);
+  set_target_state (media, GST_STATE_NULL);
   success = TRUE;
 
-  if (priv->status == GST_RTSP_MEDIA_STATUS_PREPARED) {
+  if (priv->status == GST_RTSP_MEDIA_STATUS_PREPARED ||
+      priv->status == GST_RTSP_MEDIA_STATUS_SUSPENDED) {
     GstRTSPMediaClass *klass;
 
     klass = GST_RTSP_MEDIA_GET_CLASS (media);
@@ -3522,14 +3591,16 @@ default_suspend (GstRTSPMedia * media)
       break;
     case GST_RTSP_SUSPEND_MODE_PAUSE:
       GST_DEBUG ("media %p suspend to PAUSED", media);
-      ret = set_target_state (media, GST_STATE_PAUSED, TRUE);
+      set_target_state (media, GST_STATE_PAUSED);
+      ret = set_pipeline_state (media, GST_STATE_PAUSED);
       if (ret == GST_STATE_CHANGE_FAILURE)
         goto state_failed;
       unblock = TRUE;
       break;
     case GST_RTSP_SUSPEND_MODE_RESET:
       GST_DEBUG ("media %p suspend to NULL", media);
-      ret = set_target_state (media, GST_STATE_NULL, TRUE);
+      set_target_state (media, GST_STATE_NULL);
+      ret = set_pipeline_state (media, GST_STATE_NULL);
       if (ret == GST_STATE_CHANGE_FAILURE)
         goto state_failed;
       /* Because payloader needs to set the sequence number as
@@ -3706,7 +3777,7 @@ unsuspend_failed:
 
 /* must be called with state-lock */
 static void
-media_set_pipeline_state_locked (GstRTSPMedia * media, GstState state)
+media_set_state_locked (GstRTSPMedia * media, GstState state)
 {
   GstRTSPMediaPrivate *priv = media->priv;
 
@@ -3714,7 +3785,7 @@ media_set_pipeline_state_locked (GstRTSPMedia * media, GstState state)
     gst_rtsp_media_unprepare (media);
   } else {
     GST_INFO ("state %s media %p", gst_element_state_get_name (state), media);
-    set_target_state (media, state, FALSE);
+    set_target_state (media, state);
     /* when we are buffering, don't update the state yet, this will be done
      * when buffering finishes */
     if (priv->buffering) {
@@ -3724,7 +3795,7 @@ media_set_pipeline_state_locked (GstRTSPMedia * media, GstState state)
         /* make sure pads are not blocking anymore when going to PLAYING */
         media_streams_set_blocked (media, FALSE);
 
-      set_state (media, state);
+      set_pipeline_state (media, state);
 
       /* and suspend after pause */
       if (state == GST_STATE_PAUSED)
@@ -3746,7 +3817,7 @@ gst_rtsp_media_set_pipeline_state (GstRTSPMedia * media, GstState state)
   g_return_if_fail (GST_IS_RTSP_MEDIA (media));
 
   g_rec_mutex_lock (&media->priv->state_lock);
-  media_set_pipeline_state_locked (media, state);
+  media_set_state_locked (media, state);
   g_rec_mutex_unlock (&media->priv->state_lock);
 }
 
@@ -3847,7 +3918,8 @@ gst_rtsp_media_set_state (GstRTSPMedia * media, GstState state,
 
   if (priv->target_state != state) {
     if (do_state) {
-      media_set_pipeline_state_locked (media, state);
+      media_set_state_locked (media, state);
+
       g_signal_emit (media, gst_rtsp_media_signals[SIGNAL_NEW_STATE], 0, state,
           NULL);
     }

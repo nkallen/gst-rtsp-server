@@ -200,6 +200,9 @@ void                  gst_rtsp_media_set_permissions  (GstRTSPMedia *media,
                                                        GstRTSPPermissions *permissions);
 GstRTSPPermissions *  gst_rtsp_media_get_permissions  (GstRTSPMedia *media);
 
+void                  gst_rtsp_media_pipeline_set_shared (GstRTSPMedia *media, gboolean shared);
+gboolean              gst_rtsp_media_pipeline_is_shared (GstRTSPMedia *media);
+
 void                  gst_rtsp_media_set_shared       (GstRTSPMedia *media, gboolean shared);
 gboolean              gst_rtsp_media_is_shared        (GstRTSPMedia *media);
 
