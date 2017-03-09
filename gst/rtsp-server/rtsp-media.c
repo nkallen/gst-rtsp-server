@@ -2413,12 +2413,12 @@ default_handle_message (GstRTSPMedia * media, GstMessage * message)
   switch (type) {
     case GST_MESSAGE_STATE_CHANGED:
     {
+      GstState old, new, pending;
+
       /* For shared pipelines, we neither change its state nor
        *  respond to state changes */
       if (priv->shared_pipeline)
         break;
-
-      GstState old, new, pending;
 
       if (GST_MESSAGE_SRC (message) != GST_OBJECT (priv->pipeline))
         break;
